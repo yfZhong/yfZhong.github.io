@@ -267,7 +267,7 @@ If you use this system in your research, please cite:
 ```bibtex
 @software{medical_fact_checker_2026,
   title={Intelligent AI Agent for Medical Dialogue Fact-Checking},
-  author={Your Name},
+  author={yfZhong},
   year={2026},
   url={https://github.com/yfZhong/yfZhong.github.io}
 }

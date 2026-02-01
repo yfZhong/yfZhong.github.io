@@ -13,6 +13,13 @@ from typing import List, Dict, Optional, Set, Tuple
 from enum import Enum
 import re
 from collections import defaultdict
+import string
+
+
+# Configuration constants
+SIMILARITY_THRESHOLD = 0.22  # Threshold for fact similarity matching
+ENTITY_BOOST = 0.1  # Similarity boost for matching entities
+MEDICAL_TERM_BOOST = 0.05  # Similarity boost per medical term overlap
 
 
 class RelationType(Enum):
@@ -43,7 +50,7 @@ class SourceFact:
     
     # Optional structured fields
     entities: List[str] = field(default_factory=list)
-    polarity: str = "affirmed"  # "affirmed" or "negated"
+    polarity: str = "positive"  # "positive" or "negative" (affirmed/negated)
     time_scope: Optional[str] = None
     certainty: str = "definite"  # "definite", "probable", "possible"
     value_unit: Optional[Dict[str, str]] = None
@@ -157,12 +164,12 @@ class MedicalFactChecker:
         fact_id = f"sf_{turn_idx}_{sent_idx}_0"
         
         # Detect polarity (negation)
-        polarity = "affirmed"
+        polarity = "positive"
         negation_words = [r'\bno\b', r'\bnot\b', r'\bnever\b', r'\bnone\b', 
                          r'\bnothing\b', r"n't\b", r'\bwithout\b']
         sentence_lower = sentence.lower()
         if any(re.search(pattern, sentence_lower) for pattern in negation_words):
-            polarity = "negated"
+            polarity = "negative"
         
         # Detect certainty markers
         certainty = "definite"
@@ -225,7 +232,8 @@ class MedicalFactChecker:
     def _extract_value_unit(self, text: str) -> Optional[Dict[str, str]]:
         """Extract value-unit pairs like '50mg', 'twice daily'"""
         # Pattern for dosages: number + unit
-        pattern = r'(\d+\.?\d*)\s*(mg|ml|tablets?|times?|daily|hourly|weekly)'
+        # Handles: "50mg", "2 tablets", "twice daily", "three times"
+        pattern = r'(\d+\.?\d*|twice|thrice|once)\s*(mg|ml|tablets?|capsules?|times?|daily|hourly|weekly|per day)'
         match = re.search(pattern, text.lower())
         
         if match:
@@ -462,9 +470,9 @@ class MedicalFactChecker:
         # This is a simplified approach; production would use dependency parsing
         
         # Check if sentence contains 'and' that joins clauses
-        if ' and ' in sentence.lower():
+        if re.search(r'\s+and\s+', sentence, re.IGNORECASE):
             # Try to split on 'and' intelligently
-            parts = sentence.split(' and ')
+            parts = re.split(r'\s+and\s+', sentence, maxsplit=1, flags=re.IGNORECASE)
             
             # If we get exactly 2 parts and the second part is short (likely a continuation)
             if len(parts) == 2:
@@ -587,7 +595,6 @@ class MedicalFactChecker:
     def _normalize_text(self, text: str) -> Set[str]:
         """Normalize text for comparison: lowercase, remove punctuation, split into words"""
         # Remove punctuation
-        import string
         text_clean = text.lower().translate(str.maketrans('', '', string.punctuation))
         return set(text_clean.split())
     
@@ -632,25 +639,25 @@ class MedicalFactChecker:
             similarity = max(jaccard, overlap_ratio * 0.7)
             
             # Check polarity match
-            evidence_negation = (evidence.polarity == "negated")
+            evidence_negation = (evidence.polarity == "negative")
             polarity_match = (summary_negation == evidence_negation)
             
             # Boost similarity if key entities/numbers match
             summary_entities = set(self._extract_entities(summary_fact.fact_text))
             if summary_entities and set(evidence.entities) & summary_entities:
-                similarity += 0.1
+                similarity += ENTITY_BOOST
             
             # Check for specific medical terms
             medical_overlap = len(summary_entities & set(evidence.entities))
             if medical_overlap > 0:
-                similarity += medical_overlap * 0.05
+                similarity += medical_overlap * MEDICAL_TERM_BOOST
             
             # Support: good similarity and matching polarity
-            if similarity > 0.22 and polarity_match:
+            if similarity > SIMILARITY_THRESHOLD and polarity_match:
                 support_scores.append((similarity, evidence))
             
             # Rejection: good similarity but opposite polarity
-            elif similarity > 0.22 and not polarity_match:
+            elif similarity > SIMILARITY_THRESHOLD and not polarity_match:
                 reject_scores.append((similarity, evidence))
         
         # Sort by score
@@ -662,7 +669,7 @@ class MedicalFactChecker:
         if reject_scores:
             best_reject_score, best_reject_evidence = reject_scores[0]
             # If there's evidence with opposite polarity and reasonable similarity, it's a rejection
-            if best_reject_score > 0.22:
+            if best_reject_score > SIMILARITY_THRESHOLD:
                 return (
                     VerificationLabel.REJECTED,
                     f"Contradicted by source fact (turn {best_reject_evidence.turn_index}): {best_reject_evidence.fact_text}"
@@ -671,7 +678,7 @@ class MedicalFactChecker:
         if support_scores:
             # Supported by evidence
             best_support_score, best_support_evidence = support_scores[0]
-            if best_support_score > 0.22:
+            if best_support_score > SIMILARITY_THRESHOLD:
                 return (
                     VerificationLabel.SUPPORTED,
                     f"Supported by source fact (turn {best_support_evidence.turn_index}): {best_support_evidence.fact_text}"
@@ -784,8 +791,8 @@ def format_output(result: Dict) -> str:
             output.append(f"  Speaker: {fact.speaker}")
             output.append(f"  Fact: {fact.fact_text}")
             output.append(f"  Turn {fact.turn_index}, Sentence {fact.sentence_index}")
-            if fact.polarity == "negated":
-                output.append(f"  Polarity: NEGATED")
+            if fact.polarity == "negative":
+                output.append(f"  Polarity: NEGATIVE")
             if fact.time_scope:
                 output.append(f"  Time: {fact.time_scope}")
             if fact.conflict_group_id:
