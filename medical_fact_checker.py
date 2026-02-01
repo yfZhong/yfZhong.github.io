@@ -149,14 +149,19 @@ class MedicalFactChecker:
         if not sentence:
             return facts
         
+        # Skip questions - they are not factual claims
+        if sentence.endswith('?'):
+            return facts
+        
         # Generate a fact ID
         fact_id = f"sf_{turn_idx}_{sent_idx}_0"
         
         # Detect polarity (negation)
         polarity = "affirmed"
-        negation_words = ['no', 'not', 'never', 'none', 'nothing', "n't", 'without']
+        negation_words = [r'\bno\b', r'\bnot\b', r'\bnever\b', r'\bnone\b', 
+                         r'\bnothing\b', r"n't\b", r'\bwithout\b']
         sentence_lower = sentence.lower()
-        if any(neg in sentence_lower for neg in negation_words):
+        if any(re.search(pattern, sentence_lower) for pattern in negation_words):
             polarity = "negated"
         
         # Detect certainty markers
@@ -432,15 +437,72 @@ class MedicalFactChecker:
         # Split summary into sentences
         sentences = self._split_sentences(summary)
         
-        for idx, sentence in enumerate(sentences):
-            # Each sentence is treated as an atomic fact
-            fact = SummaryFact(
-                summary_fact_id=f"summ_{idx}",
-                fact_text=sentence
-            )
-            self.summary_factlist.append(fact)
+        fact_id = 0
+        for sentence in sentences:
+            # Try to split compound sentences with 'and' into atomic facts
+            # This helps detect contradictions when multiple facts are in one sentence
+            atomic_facts = self._split_compound_sentence(sentence)
+            
+            for atomic_fact in atomic_facts:
+                fact = SummaryFact(
+                    summary_fact_id=f"summ_{fact_id}",
+                    fact_text=atomic_fact
+                )
+                self.summary_factlist.append(fact)
+                fact_id += 1
         
         return self.summary_factlist
+    
+    def _split_compound_sentence(self, sentence: str) -> List[str]:
+        """
+        Split compound sentences into atomic facts.
+        Handles cases like "Patient has fever and cough" -> ["Patient has fever", "Patient has cough"]
+        """
+        # Simple splitting on 'and' for compound statements
+        # This is a simplified approach; production would use dependency parsing
+        
+        # Check if sentence contains 'and' that joins clauses
+        if ' and ' in sentence.lower():
+            # Try to split on 'and' intelligently
+            parts = sentence.split(' and ')
+            
+            # If we get exactly 2 parts and the second part is short (likely a continuation)
+            if len(parts) == 2:
+                left = parts[0].strip()
+                right = parts[1].strip()
+                
+                # Check if right part is just a noun/phrase (not a full clause)
+                # If right part doesn't have a verb, it's likely a continuation like "fever and cough"
+                right_words = right.lower().split()
+                has_verb = any(word in right_words for word in 
+                              ['has', 'have', 'is', 'are', 'was', 'were', 'experiences', 'reports', 'shows'])
+                
+                if not has_verb and len(right_words) < 5:
+                    # It's likely "X has Y and Z" format
+                    # Extract the subject and verb from left part
+                    left_words = left.split()
+                    if len(left_words) >= 2:
+                        # Find verb position
+                        verb_idx = -1
+                        for i, word in enumerate(left_words):
+                            if word.lower() in ['has', 'have', 'is', 'are', 'was', 'were', 
+                                               'experiences', 'experience', 'reports', 'report', 'shows', 'show']:
+                                verb_idx = i
+                                break
+                        
+                        if verb_idx >= 0:
+                            # Subject + verb
+                            subject_verb = ' '.join(left_words[:verb_idx+1])
+                            first_object = ' '.join(left_words[verb_idx+1:])
+                            
+                            # Create two atomic facts
+                            return [
+                                f"{subject_verb} {first_object}".strip(),
+                                f"{subject_verb} {right}".strip()
+                            ]
+        
+        # Default: return the sentence as-is
+        return [sentence]
     
     # ==================== STEP 3: Verify summary facts ====================
     
@@ -584,11 +646,11 @@ class MedicalFactChecker:
                 similarity += medical_overlap * 0.05
             
             # Support: good similarity and matching polarity
-            if similarity > 0.25 and polarity_match:
+            if similarity > 0.22 and polarity_match:
                 support_scores.append((similarity, evidence))
             
             # Rejection: good similarity but opposite polarity
-            elif similarity > 0.25 and not polarity_match:
+            elif similarity > 0.22 and not polarity_match:
                 reject_scores.append((similarity, evidence))
         
         # Sort by score
@@ -600,7 +662,7 @@ class MedicalFactChecker:
         if reject_scores:
             best_reject_score, best_reject_evidence = reject_scores[0]
             # If there's evidence with opposite polarity and reasonable similarity, it's a rejection
-            if best_reject_score > 0.25:
+            if best_reject_score > 0.22:
                 return (
                     VerificationLabel.REJECTED,
                     f"Contradicted by source fact (turn {best_reject_evidence.turn_index}): {best_reject_evidence.fact_text}"
@@ -609,7 +671,7 @@ class MedicalFactChecker:
         if support_scores:
             # Supported by evidence
             best_support_score, best_support_evidence = support_scores[0]
-            if best_support_score > 0.3:
+            if best_support_score > 0.22:
                 return (
                     VerificationLabel.SUPPORTED,
                     f"Supported by source fact (turn {best_support_evidence.turn_index}): {best_support_evidence.fact_text}"
